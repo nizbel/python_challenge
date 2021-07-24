@@ -66,31 +66,34 @@ class GeoLocator:
     # URL for a batch search of up to 100 ips
     url = 'http://ip-api.com/batch'
 
-    cache = {}
     cache_size = 10000
+    cache_file = 'cache/.geocache'
 
-    def __init__(self, ips_list=[]):
+    def __init__(self, ips_list=[], verbose=False):
         self.ips_list = list(ips_list)
         self.request_data = []
-        self.load_cache()
         self.geo_info_list = []
-        # Keeps track of the current index of the list we are getting info
-        self.cur_geo_info_index = 0
+
+        # Prepare cache
+        self.cache = {}
+        self.load_cache()
+
+        self.verbose = verbose
 
     def load_cache(self):
         """
         Load cache from .cache file
         """
         try:
-            with open('.cache', 'r') as cache:
+            with open(self.cache_file, 'r') as cache:
                 geo_info_list = json.load(cache, object_hook=GeoInfo.decode_json)
                 for geo_info in geo_info_list:
                     self.cache[geo_info.ip] = geo_info
 
+            print('Geo cache size:', len(self.cache.keys()))
         except FileNotFoundError:
-            self.cache = {}
             # Initialize cache file
-            with open('.cache', 'w') as cache:
+            with open(self.cache_file, 'w') as cache:
                 cache.write('[]')
 
     def set_ip_list(self, ips_list):
@@ -99,7 +102,6 @@ class GeoLocator:
         :param ips_list: list of IPs as strings
         """
         self.ips_list = list(ips_list)
-        self.cur_geo_info_index = 0
 
     def prepare_request_data(self):
         """
@@ -123,14 +125,14 @@ class GeoLocator:
         """
         Writes cache info to .cache file
         """
-        with open('.cache', 'w') as cache:
+        with open(self.cache_file, 'w') as cache:
             cache_values = list(self.cache.values())
             if len(cache_values) > self.cache_size:
-                json.dump(cache_values[-self.cache_size:], cache, default=GeoInfo.to_json, indent=2)
+                json.dump(cache_values[-self.cache_size:], cache, default=GeoInfo.to_json)
             else:
-                json.dump(cache_values, cache, default=GeoInfo.to_json, indent=2)
+                json.dump(cache_values, cache, default=GeoInfo.to_json)
 
-    def find_location_info(self):
+    def find_geo_location_info(self):
         """
         Uses current list of IPs to find geo location info
         :return: list with geo location info
@@ -138,26 +140,29 @@ class GeoLocator:
         # Keep on making batch requests until list is over
         while self.ips_list:
             self.prepare_request_data()
-            response = requests.post(self.url, json=self.request_data)
-            data = list(response.json())
 
-            # Fill GeoInfo data for every successful response
-            for ip_info in data:
-                for geo_info in self.geo_info_list[self.cur_geo_info_index:]:
-                    if geo_info.ip == ip_info['query']:
-                        if ip_info['status'] == 'success':
-                            geo_info.fill_geo_info(ip_info['country'], ip_info['countryCode'], ip_info['region'],
-                                                   ip_info['regionName'], ip_info['city'], ip_info['zip'],
-                                                   ip_info['timezone'], ip_info['lat'], ip_info['lon'], ip_info['isp'],
-                                                   ip_info['as'])
-                        else:
-                            geo_info.fill_error_message(ip_info['message'])
-                        # Update cache
-                        self.cache[geo_info.ip] = geo_info
-                        break
+            # Check if request data is not empty
+            if self.request_data:
+                response = requests.post(self.url, json=self.request_data)
 
-            # Update geo info list index
-            self.cur_geo_info_index += len(self.request_data)
+                if self.verbose:
+                    print('(Geo)', response.status_code, f'remaining {len(self.ips_list)}')
+                data = list(response.json())
+
+                # Fill GeoInfo data for every successful response
+                for ip_info in data:
+                    for geo_info in self.geo_info_list:
+                        if geo_info.ip == ip_info['query']:
+                            if ip_info['status'] == 'success':
+                                geo_info.fill_geo_info(ip_info['country'], ip_info['countryCode'], ip_info['region'],
+                                                       ip_info['regionName'], ip_info['city'], ip_info['zip'],
+                                                       ip_info['timezone'], ip_info['lat'], ip_info['lon'], ip_info['isp'],
+                                                       ip_info['as'])
+                            else:
+                                geo_info.fill_error_message(ip_info['message'])
+                            # Update cache
+                            self.cache[geo_info.ip] = geo_info
+                            break
 
         # Update cache file at the end
         self.update_cache()

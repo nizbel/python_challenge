@@ -1,83 +1,67 @@
 import json
 import requests
+import time
+
+from threading import Thread
 
 
-class GeoInfo:
-    def __init__(self, ip, country='', country_code='', region='', region_name='', city='', zip_code='',
-                 timezone='', latitude='', longitude='', isp='', as_info='', error_message=''):
+class RDAPLookupThread(Thread):
+    def __init__(self, request_url, ip, manager):
+        self.request_url = request_url
         self.ip = ip
-        self.country = country
-        self.country_code = country_code
-        self.region = region
-        self.region_name = region_name
-        self.city = city
-        self.zip_code = zip_code
-        self.timezone = timezone
-        self.latitude = latitude
-        self.longitude = longitude
-        self.isp = isp
-        self.as_info = as_info
-        self.error_message = error_message
+        self.manager = manager
+        super().__init__()
 
-    def fill_geo_info(self, country, country_code, region, region_name, city, zip_code,
-                      timezone, latitude, longitude, isp, as_info):
-        self.country = country
-        self.country_code = country_code
-        self.region = region
-        self.region_name = region_name
-        self.city = city
-        self.zip_code = zip_code
-        self.timezone = timezone
-        self.latitude = latitude
-        self.longitude = longitude
-        self.isp = isp
-        self.as_info = as_info
+    def run(self):
+        try:
+            response = requests.get(self.request_url + self.ip)
+            data = response.json()
 
-    def fill_error_message(self, error_message):
-        self.error_message = error_message
+            # Filter info we'll gather
+            # if 'entities' in data and 'status' in data:
+            rdap_info = {'entities': data['entities'], 'status': data['status'], 'ip': self.ip}
+            # else:
+            #     rdap_info = {'entities': [], 'status': '', 'ip': self.ip}
 
-    @staticmethod
-    def to_json(obj):
-        # return json.dumps(self, default=lambda o: o.__dict__,
-        #                   sort_keys=True)
-        if obj.error_message:
-            return {'ip': obj.ip, 'error_message': obj.error_message}
-        return {
-            'ip': obj.ip,
-            'country': obj.country,
-            'country_code': obj.country_code,
-            'region': obj.region,
-            'region_name': obj.region_name,
-            'city': obj.city,
-            'zip_code': obj.zip_code,
-            'timezone': obj.timezone,
-            'latitude': obj.latitude,
-            'longitude': obj.longitude,
-            'isp': obj.isp
-        }
-
-    @staticmethod
-    def decode_json(json_dict):
-        return GeoInfo(**json_dict)
+            # Update RDAP information list in manager
+            self.manager.rdap_info_list.append(rdap_info)
+            # Update cache
+            self.manager.cache[self.ip] = data
+        except Exception as e:
+            # template = "An exception of type {0} occured. Arguments:\n{1!r}"
+            # message = template.format(type(e).__name__, e.args)
+            # print(message)
+            print(f'Retrying {self.ip}')
+            # Add url for retry
+            self.manager.ips_list.append(self.ip)
 
 
-class GeoLocator:
-    # url = 'http://ipinfo.io/
-    # URL for a batch search of up to 100 ips
-    url = 'http://ip-api.com/batch'
+class RDAPManager:
+    # URLs retrieved from ipwhois docs
+    urls = ['http://rdap.arin.net/registry/ip/',
+            'http://rdap.db.ripe.net/ip/',
+            'http://rdap.apnic.net/ip/',
+            'http://rdap.lacnic.net/rdap/ip/',
+            'http://rdap.afrinic.net/rdap/ip/'
+            ]
 
     cache_size = 10000
-    cache_file = '.geocache'
+    cache_file = 'cache/.rdapcache'
 
-    def __init__(self, ips_list=[]):
+    def __init__(self, ips_list=[], threads_amount=4, verbose=False):
         self.ips_list = list(ips_list)
-        self.request_data = []
-        self.geo_info_list = []
-        # Keeps track of the current index of the list we are getting info
-        self.cur_geo_info_index = 0
+        self.rdap_info_list = []
+        self.current_url_index = 0
 
+        # Prepare cache
         self.cache = {}
         self.load_cache()
+
+        # Prepare threads
+        self.thread_amount = threads_amount
+        self.threads = []
+
+        self.verbose = verbose
 
     def load_cache(self):
         """
@@ -85,10 +69,11 @@ class GeoLocator:
         """
         try:
             with open(self.cache_file, 'r') as cache:
-                geo_info_list = json.load(cache, object_hook=GeoInfo.decode_json)
-                for geo_info in geo_info_list:
-                    self.cache[geo_info.ip] = geo_info
+                rdap_info_list = json.load(cache)
+                for rdap_info in rdap_info_list:
+                    self.cache[rdap_info['ip']] = rdap_info
 
+            print('RDAP cache size:', len(self.cache.keys()))
         except FileNotFoundError:
             # Initialize cache file
             with open(self.cache_file, 'w') as cache:
@@ -100,25 +85,18 @@ class GeoLocator:
         :param ips_list: list of IPs as strings
         """
         self.ips_list = list(ips_list)
-        self.cur_geo_info_index = 0
 
-    def prepare_request_data(self):
+    def check_ip_in_cache(self, ip):
         """
-        Fills request data up to 100 IPs
+        Checks if IP is already in cache
+        :param ip: string containing IP
+        :return: True if IP is in cache, False otherwise
         """
-        self.request_data = []
-
-        while len(self.request_data) < 100 and self.ips_list:
-            ip = self.ips_list.pop()
-            # Check for cached ips
-            if ip in self.cache:
-                self.geo_info_list.append(self.cache[ip])
-            elif ip in self.request_data:
-                # If ip is already in request data, avoid sending it
-                self.geo_info_list.append(GeoInfo(ip))
-            else:
-                self.request_data.append(ip)
-                self.geo_info_list.append(GeoInfo(ip))
+        # Check for cached ips
+        if ip in self.cache:
+            self.rdap_info_list.append(self.cache[ip])
+            return True
+        return False
 
     def update_cache(self):
         """
@@ -127,40 +105,45 @@ class GeoLocator:
         with open(self.cache_file, 'w') as cache:
             cache_values = list(self.cache.values())
             if len(cache_values) > self.cache_size:
-                json.dump(cache_values[-self.cache_size:], cache, default=GeoInfo.to_json, indent=2)
+                json.dump(cache_values[-self.cache_size:], cache)
             else:
-                json.dump(cache_values, cache, default=GeoInfo.to_json)
+                json.dump(cache_values, cache)
 
-    def find_location_info(self):
+    def get_current_url(self):
         """
-        Uses current list of IPs to find geo location info
-        :return: list with geo location info
+        Returns the current used url and sets the index for the next one on the list
+        :return: current url by the index value
         """
-        # Keep on making batch requests until list is over
+        current_url = self.urls[self.current_url_index]
+        self.current_url_index += 1
+        if self.current_url_index == len(self.urls):
+            # Returns to first url
+            self.current_url_index = 0
+        return current_url
+
+    def find_rdap_info(self):
+        """
+        Uses current list of IPs to find RDAP info
+        :return: list with RDAP info
+        """
+        # Keep on making requests until list is over
         while self.ips_list:
-            self.prepare_request_data()
-            response = requests.post(self.url, json=self.request_data)
-            data = list(response.json())
+            ip = self.ips_list.pop()
+            if not self.check_ip_in_cache(ip):
+                new_thread = RDAPLookupThread(self.get_current_url(), ip, self)
+                new_thread.start()
+                self.threads.append(new_thread)
+                if self.verbose:
+                    print(f'(RDAP) IPs remaining {len(self.ips_list)}')
 
-            # Fill GeoInfo data for every successful response
-            for ip_info in data:
-                for geo_info in self.geo_info_list[self.cur_geo_info_index:]:
-                    if geo_info.ip == ip_info['query']:
-                        if ip_info['status'] == 'success':
-                            geo_info.fill_geo_info(ip_info['country'], ip_info['countryCode'], ip_info['region'],
-                                                   ip_info['regionName'], ip_info['city'], ip_info['zip'],
-                                                   ip_info['timezone'], ip_info['lat'], ip_info['lon'], ip_info['isp'],
-                                                   ip_info['as'])
-                        else:
-                            geo_info.fill_error_message(ip_info['message'])
-                        # Update cache
-                        self.cache[geo_info.ip] = geo_info
-                        break
+                # Check if any thread ended
+                while len(self.threads) == self.thread_amount and all([thread.is_alive() for thread in self.threads]):
+                    time.sleep(2)
 
-            # Update geo info list index
-            self.cur_geo_info_index += len(self.request_data)
+                # Remove empty threads
+                self.threads[:] = [thread for thread in self.threads if thread.is_alive()]
 
         # Update cache file at the end
         self.update_cache()
 
-        return self.geo_info_list
+        return self.rdap_info_list
