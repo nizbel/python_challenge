@@ -18,6 +18,10 @@ if __name__ == "__main__":
     # Create read files folder if doesn't exist
     Path(files_read_folder).mkdir(exist_ok=True)
 
+    cache_folder = 'cache'
+    # Create cache folder if doesn't exist
+    Path(cache_folder).mkdir(exist_ok=True)
+
     # Parse file argument
     parser = argparse.ArgumentParser(description='Read file to search for IPs and realize Geo IP and RDAP lookups')
     parser.add_argument('--file', metavar='path', required=True,
